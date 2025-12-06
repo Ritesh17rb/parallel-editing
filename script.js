@@ -1,6 +1,8 @@
 // script.js — module
 import * as Y from 'yjs';
-import { WebrtcProvider } from 'y-webrtc';
+// import { WebrtcProvider } from 'y-webrtc';
+// import { BroadcastChannelProvider } from 'y-broadcastchannel';
+import { IndexeddbPersistence } from 'y-indexeddb';
 import { QuillBinding } from 'y-quill';
 import Quill from 'quill';
 
@@ -12,14 +14,13 @@ import 'bootstrap-llm-provider'; // web component; no bindings needed here
 import config from './config.js';
 
 // -------------------------
-// 1. Yjs + WebRTC + Quill
+// 1. Yjs + IndexedDB + Quill
 // -------------------------
 const ydoc = new Y.Doc();
 const ytext = ydoc.getText('quill');
 
-const provider = new WebrtcProvider(config.roomName, ydoc, {
-  signaling: ['wss://signaling.yjs.dev'] // default public signaling server
-});
+// IndexedDB provider persists data and syncs across tabs.
+const provider = new IndexeddbPersistence(config.roomName, ydoc);
 
 const editor = new Quill('#editor-container', {
   theme: 'snow',
@@ -36,21 +37,23 @@ const editor = new Quill('#editor-container', {
 
 const binding = new QuillBinding(ytext, editor);
 
-// fill initialContent only when remote doc is empty after first sync
+// fill initialContent only when doc is empty after sync
 provider.on('synced', () => {
   if (ytext.toString().trim() === '') {
     // paste once (use Quill's clipboard to preserve HTML)
     editor.clipboard.dangerouslyPasteHTML(0, config.initialContent);
     log(`Initialized document with template content.`);
   }
-  log(`Connected to room: ${config.roomName}`);
+  log(`Connected to local storage (IndexedDB).`);
 });
 
-// awareness updates (active users)
-provider.awareness.on('change', () => {
-  const count = provider.awareness.getStates().size;
-  document.getElementById('user-count').innerText = String(count);
-});
+// provider.on('synced', () => { ... });
+
+// awareness updates (not supported by IndexeddbPersistence alone)
+// provider.awareness.on('change', () => {
+//   const count = provider.awareness.getStates().size;
+//   document.getElementById('user-count').innerText = String(count);
+// });
 
 // -------------------------
 // 2. UI helpers & logging
@@ -65,12 +68,32 @@ function log(msg) {
 }
 
 // allow configure button to open provider modal
+// allow configure button to open provider modal
+// We use a native Bootstrap modal instead of the web component for reliability.
+let configModal; // lazy init
 document.getElementById('configure-llm').addEventListener('click', () => {
-  if (llmProviderEl) {
-    llmProviderEl.open = true;
-  } else {
-    alert('LLM provider element not found.');
+  if (!configModal) {
+    configModal = new bootstrap.Modal(document.getElementById('llmConfigModal'));
   }
+  // populate current values
+  document.getElementById('llm-api-key').value = localStorage.getItem('llm_api_key') || '';
+  document.getElementById('llm-url').value = localStorage.getItem('llm_url') || '';
+  
+  configModal.show();
+});
+
+document.getElementById('save-llm-config').addEventListener('click', () => {
+  const key = document.getElementById('llm-api-key').value.trim();
+  const url = document.getElementById('llm-url').value.trim();
+  
+  if (key) localStorage.setItem('llm_api_key', key);
+  else localStorage.removeItem('llm_api_key');
+  
+  if (url) localStorage.setItem('llm_url', url);
+  else localStorage.removeItem('llm_url');
+  
+  if (configModal) configModal.hide();
+  log('Configuration saved.');
 });
 
 // -------------------------
@@ -145,40 +168,92 @@ async function triggerAI(instruction, mode = 'insert') {
   let insertIndex = intendedIndex;
 
   try {
-    // asyncLLM returns an async iterator of events (depends on the package build)
-    for await (const ev of asyncLLM(endpoint, {
+    // 3) call the streaming endpoint using standard fetch
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${llmConfig.apiKey}`
       },
-      body
-    })) {
-      // The event shape differs by library. We'll handle common cases:
-      // - ev.delta (string chunk)
-      // - ev (string)
-      // - ev.type === 'delta' && ev.data
-      let chunk = '';
+      body: JSON.stringify(body)
+    });
 
-      if (!ev) continue;
-      if (typeof ev === 'string') {
-        chunk = ev;
-      } else if (typeof ev === 'object') {
-        // common shapes:
-        if ('delta' in ev && typeof ev.delta === 'string') chunk = ev.delta;
-        else if ('text' in ev && typeof ev.text === 'string') chunk = ev.text;
-        else if ('data' in ev && typeof ev.data === 'string') chunk = ev.data;
-        else if (ev.type === 'chunk' && ev.chunk) chunk = ev.chunk;
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = '';
+    let streamBuffer = ''; // buffer for handling split HTML tags
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep partial line
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+        if (trimmed.startsWith('data: ')) {
+          try {
+            const json = JSON.parse(trimmed.substring(6));
+            const content = json.choices?.[0]?.delta?.content || '';
+            
+            if (content) {
+              // Append to stream buffer to handle split tags
+              streamBuffer += content;
+              
+              let output = '';
+              // Process buffer for tags
+              while (true) {
+                const tagStart = streamBuffer.indexOf('<');
+                if (tagStart === -1) {
+                  // No tags, safe to output everything
+                  output += streamBuffer;
+                  streamBuffer = '';
+                  break;
+                }
+                
+                if (tagStart > 0) {
+                  // Text before tag
+                  output += streamBuffer.slice(0, tagStart);
+                  streamBuffer = streamBuffer.slice(tagStart);
+                  continue;
+                }
+                
+                // Starts with <, look for end
+                const tagEnd = streamBuffer.indexOf('>');
+                if (tagEnd === -1) {
+                  // Partial tag, wait for more chunks
+                  break;
+                }
+                
+                // Full tag found, discard it
+                streamBuffer = streamBuffer.slice(tagEnd + 1);
+              }
+
+              // Clean up any markdown artifacts from the safe output
+              if (output.includes('```html')) output = output.replace('```html', '');
+              if (output.includes('```')) output = output.replace('```', '');
+
+              if (output) {
+                insertIndex = Math.min(insertIndex, ytext.length);
+                ytext.insert(insertIndex, output);
+                insertIndex += output.length;
+                
+                // Artificial delay for parallel editing demo
+                await new Promise(r => setTimeout(r, 60)); // slightly faster
+              }
+            }
+          } catch (e) {
+            console.warn('Error parsing stream chunk', e);
+          }
+        }
       }
-
-      if (!chunk) continue; // nothing meaningful this iteration
-
-      // Resolve current absolute index (clamp to document length)
-      insertIndex = Math.min(insertIndex, ytext.length);
-      // Insert chunk into CRDT — this will propagate to all peers and update editor
-      ytext.insert(insertIndex, chunk);
-      // Advance our local notion of the insertion point so next chunk appends
-      insertIndex += chunk.length;
     }
 
     // finished streaming

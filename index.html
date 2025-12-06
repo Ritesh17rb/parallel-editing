@@ -88,7 +88,7 @@
       </button>
       <div class="collapse navbar-collapse" id="navbarSupportedContent">
 
-        <llm-provider id="llm-provider" modal="true"></llm-provider>
+        <!-- Native Bootstrap Modal used instead of web component -->
 
         <div class="nav-item dropdown ms-auto" role="group" aria-label="Configure LLM" title="Configure LLM">
           <button id="configure-llm" class="btn btn-outline-primary" type="button" aria-label="Configure LLM"> <i
@@ -141,6 +141,10 @@
             <p class="small text-muted">The AI acts as a user. It streams edits via CRDTs while you type.</p>
 
             <div class="d-grid gap-2 mb-4">
+              <button class="btn btn-warning text-start ai-action" data-mode="fill-gaps"
+                data-prompt="Identify all placeholders (like [DATE], [PARTY], etc) and replace them with realistic values for a Technology Services Agreement.">
+                <i class="bi bi-pencil-square me-2"></i> <b>Fill Gaps</b> / Placeholders
+              </button>
               <button class="btn btn-outline-light text-start ai-action" data-mode="insert"
                 data-prompt="Add a 'Force Majeure' clause covering pandemics and government acts.">
                 <i class="bi bi-plus-circle me-2"></i> Insert <b>Force Majeure</b>
@@ -205,11 +209,12 @@
   <script type="importmap">
     {
       "imports": {
-        "bootstrap-llm-provider": "https://cdn.jsdelivr.net/npm/bootstrap-llm-provider@1/+esm",
+        "bootstrap-llm-provider": "https://cdn.jsdelivr.net/npm/bootstrap-llm-provider@latest/+esm",
         "asyncllm": "https://cdn.jsdelivr.net/npm/asyncllm@2/+esm",
         "saveform": "https://cdn.jsdelivr.net/npm/saveform@1.4.0/+esm",
         "yjs": "https://esm.sh/yjs@13",
         "y-webrtc": "https://esm.sh/y-webrtc@10?external=yjs",
+        "y-indexeddb": "https://esm.sh/y-indexeddb?external=yjs",
         "y-quill": "https://esm.sh/y-quill?external=yjs,quill",
         "quill": "https://esm.sh/quill@1.3.6"
       }
@@ -219,6 +224,35 @@
   <script src="https://cdn.jsdelivr.net/npm/@gramex/ui@0.3.1/dist/dark-theme.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"></script>
   <script type="module" src="script.js"></script>
+
+  <!-- Local LLM Config Modal -->
+  <div class="modal fade" id="llmConfigModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Configure LLM</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <form>
+            <div class="mb-3">
+              <label for="llm-api-key" class="form-label">API Key</label>
+              <input type="password" class="form-control" id="llm-api-key" placeholder="sk-..." autocomplete="off">
+            </div>
+            <div class="mb-3">
+              <label for="llm-url" class="form-label">Base URL</label>
+              <input type="text" class="form-control" id="llm-url" placeholder="https://api.openai.com/v1">
+              <div class="form-text small">Optional. Leave empty for default OpenAI.</div>
+            </div>
+          </form>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          <button type="button" class="btn btn-primary" id="save-llm-config">Save Settings</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
 </body>
 
