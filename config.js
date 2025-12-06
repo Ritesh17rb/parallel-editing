@@ -1,5 +1,5 @@
 export default {
-  roomName: "straive-contract-collab-v1",
+  roomName: "contract-collab-v1",
 
   initialContent: `
     <h1 style="text-align: center;">MASTER SERVICES AGREEMENT</h1>

@@ -147,7 +147,7 @@ async function triggerAI(instruction, mode = 'insert') {
   log(`AI started: ${instruction}`);
 
   // 3) call the streaming asyncLLM endpoint
-  const baseUrl = (llmConfig.url && llmConfig.url.length) ? llmConfig.url : 'https://llmfoundry.straive.com/openai/v1';
+  const baseUrl = (llmConfig.url && llmConfig.url.length) ? llmConfig.url : 'https://api.openai.com/v1';
   const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
 
   const modelInput = document.getElementById('model')?.value || 'gpt-4o-mini';
