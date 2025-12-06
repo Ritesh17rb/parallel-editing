@@ -1,4 +1,4 @@
-# Straive Contract AI Collaboration Demo
+# Contract AI Collaboration Demo
 
 A real-time "Agentic Collaboration" demo where an LLM acts as a user within a shared document.
 
@@ -14,7 +14,7 @@ A real-time "Agentic Collaboration" demo where an LLM acts as a user within a sh
     npx http-server .
     ```
 2.  **Open Browser**: Go to `http://127.0.0.1:8080`.
-3.  **Authentication**: Enter your **Straive Foundry API Key** in the top navigation bar.
+3.  **Authentication**: Enter your **LLM API Key** in the top navigation bar.
 4.  **Collaborate**:
     * Open a second window to simulate another user.
     * Select text and click "Make Selection Mutual" to see the AI generate a suggestion.
@@ -22,6 +22,6 @@ A real-time "Agentic Collaboration" demo where an LLM acts as a user within a sh
 
 ## ⚙️ Configuration
 See `config.js` to change the:
-* `llmBaseUrl`: Currently set to `https://llmfoundry.straive.com/openai/v1`.
+* `llmBaseUrl`: Currently set to `https://api.openai.com/v1`.
 * `model`: Currently `gpt-4o-mini`.
 * `initialContent`: The default contract text.
