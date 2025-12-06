@@ -131,7 +131,14 @@ async function triggerAI(instruction, mode = 'insert') {
   // If "rewrite" and there's a selection, restrict prompt to selection
   const sel = editor.getSelection();
   let intendedIndex = ytext.length; // default: append at end
-  if (mode === 'rewrite' && sel && sel.length > 0) {
+
+  if (mode === 'fill-gaps') {
+    // Search-and-replace approach for "fill-gaps"
+    // We ask the AI to list the replacements, and we apply them in-place.
+    prompt = `Current Contract Text:\n${currentDocText}\n\nTask: ${instruction}\n\nOutput a list of replacements in this format:\nPlaceholder ||| Replacement Value\n\nExample:\n[DATE] ||| October 1, 2023\n\nOutput ONLY the list.`;
+    // We do NOT clear the document. We will "hunt" for placeholders.
+    intendedIndex = -1; // Special flag to indicate "no stream insertion, just processing"
+  } else if (mode === 'rewrite' && sel && sel.length > 0) {
     const selectedText = editor.getText(sel.index, sel.length);
     prompt = `Original Text: "${selectedText}"\n\nTask: ${instruction}\n\nOutput only the rewritten text (HTML allowed).`;
     // propose to insert after selection end
@@ -145,6 +152,8 @@ async function triggerAI(instruction, mode = 'insert') {
   const header = document.querySelector('.card-header');
   header.classList.add('ai-active-border');
   log(`AI started: ${instruction}`);
+
+
 
   // 3) call the streaming asyncLLM endpoint
   const baseUrl = (llmConfig.url && llmConfig.url.length) ? llmConfig.url : 'https://api.openai.com/v1';
@@ -184,6 +193,7 @@ async function triggerAI(instruction, mode = 'insert') {
     const decoder = new TextDecoder("utf-8");
     let buffer = '';
     let streamBuffer = ''; // buffer for handling split HTML tags
+    let lineBuffer = '';   // buffer for line-by-line processing (fill-gaps)
 
     while (true) {
       const { done, value } = await reader.read();
@@ -204,49 +214,67 @@ async function triggerAI(instruction, mode = 'insert') {
             const content = json.choices?.[0]?.delta?.content || '';
             
             if (content) {
-              // Append to stream buffer to handle split tags
-              streamBuffer += content;
-              
-              let output = '';
-              // Process buffer for tags
-              while (true) {
-                const tagStart = streamBuffer.indexOf('<');
-                if (tagStart === -1) {
-                  // No tags, safe to output everything
-                  output += streamBuffer;
-                  streamBuffer = '';
-                  break;
+              // MODE: Fill Gaps (Search & Replace)
+              if (intendedIndex === -1) {
+                lineBuffer += content;
+                // Parse complete lines from lineBuffer
+                if (lineBuffer.includes('\n')) {
+                  const parts = lineBuffer.split('\n');
+                  lineBuffer = parts.pop(); // keep incomplete line
+                  
+                  for (const part of parts) {
+                    if (part.includes('|||')) {
+                      let [placeholder, replacement] = part.split('|||').map(s => s.trim());
+                      // Cleanup replacement text
+                      replacement = replacement.replace(/^html/i, '').trim(); // common artifact
+                      if (replacement.includes('```')) replacement = replacement.replace(/```/g, ''); 
+                      
+                      // Find in document
+                      const currentText = ytext.toString();
+                      const idx = currentText.indexOf(placeholder);
+                      if (idx !== -1) {
+                        ytext.delete(idx, placeholder.length);
+                        ytext.insert(idx, replacement);
+                        // Visual delay for "reading" effect
+                        await new Promise(r => setTimeout(r, 600)); 
+                      }
+                    }
+                  }
                 }
-                
-                if (tagStart > 0) {
-                  // Text before tag
-                  output += streamBuffer.slice(0, tagStart);
-                  streamBuffer = streamBuffer.slice(tagStart);
-                  continue;
+              } 
+              // MODE: Insert / Rewrite (Streaming Text)
+              else {
+                streamBuffer += content;
+                let output = '';
+                // Process buffer for tags (strip HTML)
+                while (true) {
+                    const tagStart = streamBuffer.indexOf('<');
+                    if (tagStart === -1) {
+                        output += streamBuffer; 
+                        streamBuffer = ''; 
+                        break; 
+                    }
+                    if (tagStart > 0) {
+                        output += streamBuffer.slice(0, tagStart);
+                        streamBuffer = streamBuffer.slice(tagStart);
+                        continue;
+                    }
+                    const tagEnd = streamBuffer.indexOf('>');
+                    if (tagEnd === -1) break;
+                    streamBuffer = streamBuffer.slice(tagEnd + 1);
                 }
-                
-                // Starts with <, look for end
-                const tagEnd = streamBuffer.indexOf('>');
-                if (tagEnd === -1) {
-                  // Partial tag, wait for more chunks
-                  break;
-                }
-                
-                // Full tag found, discard it
-                streamBuffer = streamBuffer.slice(tagEnd + 1);
-              }
 
-              // Clean up any markdown artifacts from the safe output
-              if (output.includes('```html')) output = output.replace('```html', '');
-              if (output.includes('```')) output = output.replace('```', '');
+                // Clean up artifacts
+                if (output.includes('```html')) output = output.replace('```html', '');
+                if (output.includes('```')) output = output.replace('```', '');
+                output = output.replace(/^\s*html\s*/i, '');
 
-              if (output) {
-                insertIndex = Math.min(insertIndex, ytext.length);
-                ytext.insert(insertIndex, output);
-                insertIndex += output.length;
-                
-                // Artificial delay for parallel editing demo
-                await new Promise(r => setTimeout(r, 60)); // slightly faster
+                if (output) {
+                  insertIndex = Math.min(insertIndex, ytext.length);
+                  ytext.insert(insertIndex, output);
+                  insertIndex += output.length;
+                  await new Promise(r => setTimeout(r, 60));
+                }
               }
             }
           } catch (e) {
