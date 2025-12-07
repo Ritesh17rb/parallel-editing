@@ -1,6 +1,6 @@
 // script.js — module
 import * as Y from 'yjs';
-// import { WebrtcProvider } from 'y-webrtc';
+import { WebrtcProvider } from 'y-webrtc';
 // import { BroadcastChannelProvider } from 'y-broadcastchannel';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { QuillBinding } from 'y-quill';
@@ -11,7 +11,7 @@ import Quill from 'quill';
 import asyncLLM from 'asyncllm';
 
 import 'bootstrap-llm-provider'; // web component; no bindings needed here
-import config from './config.js';
+import config, { templates } from './config.js';
 
 // -------------------------
 // 1. Yjs + IndexedDB + Quill
@@ -19,8 +19,41 @@ import config from './config.js';
 const ydoc = new Y.Doc();
 const ytext = ydoc.getText('quill');
 
-// IndexedDB provider persists data and syncs across tabs.
-const provider = new IndexeddbPersistence(config.roomName, ydoc);
+// 1a. Room Setup (Auto-generate unique room if missing)
+const urlParams = new URLSearchParams(window.location.search);
+let roomName = urlParams.get('room');
+
+function generateRoomId() {
+  return 'doc-' + Math.random().toString(36).substring(2, 9);
+}
+
+if (!roomName) {
+  roomName = generateRoomId();
+  // Update URL without reloading
+  const newUrl = new URL(window.location);
+  newUrl.searchParams.set('room', roomName);
+  window.history.replaceState({}, '', newUrl);
+}
+
+// Update UI
+const roomEl = document.getElementById('room-name');
+if (roomEl) roomEl.innerText = roomName;
+
+// Copy Link Handler
+document.getElementById('room-badge')?.addEventListener('click', () => {
+  const url = new URL(window.location);
+  url.searchParams.set('room', roomName);
+  navigator.clipboard.writeText(url.toString()).then(() => {
+    // Visual feedback
+    const badge = document.getElementById('room-badge');
+    const original = badge.innerHTML;
+    badge.innerHTML = `<i class="bi bi-check"></i> Copied!`;
+    setTimeout(() => badge.innerHTML = original, 2000);
+  });
+});
+
+// IndexedDB persistence (Unique per room)
+const provider = new IndexeddbPersistence(roomName, ydoc);
 
 const editor = new Quill('#editor-container', {
   theme: 'snow',
@@ -47,13 +80,37 @@ provider.on('synced', () => {
   log(`Connected to local storage (IndexedDB).`);
 });
 
-// provider.on('synced', () => { ... });
+// 1b. Network provider (WebRTC)
+// We revert to the default signaling servers which are usually most reliable for demos.
+const webrtcProvider = new WebrtcProvider(roomName, ydoc);
 
-// awareness updates (not supported by IndexeddbPersistence alone)
-// provider.awareness.on('change', () => {
-//   const count = provider.awareness.getStates().size;
-//   document.getElementById('user-count').innerText = String(count);
-// });
+// Awareness (User Count)
+webrtcProvider.awareness.on('change', () => {
+  const count = webrtcProvider.awareness.getStates().size;
+  document.getElementById('user-count').innerText = String(count);
+});
+
+// Diagnostic Logging
+webrtcProvider.on('status', event => {
+  if (event.connected) {
+    log('<span class="text-success">✓ Connected to signaling server</span>');
+  } else {
+    log('<span class="text-warning">⚠ Disconnected from signaling</span>');
+  }
+});
+
+webrtcProvider.on('peers', (event) => {
+  const added = event.added.length;
+  const removed = event.removed.length;
+  const webRtcPeers = event.webrtcPeers.length;
+  const bcPeers = event.bcPeers.length;
+  
+  if (added || removed) {
+     log(`Peers updated: ${webRtcPeers} WebRTC, ${bcPeers} Local.`);
+  }
+});
+
+webrtcProvider.connect();
 
 // -------------------------
 // 2. UI helpers & logging
@@ -268,11 +325,28 @@ async function triggerAI(instruction, mode = 'insert') {
                 if (output.includes('```html')) output = output.replace('```html', '');
                 if (output.includes('```')) output = output.replace('```', '');
                 output = output.replace(/^\s*html\s*/i, '');
+                
+                // Normalize newlines to prevent index drift (CRLF -> LF)
+                output = output.replace(/\r\n/g, '\n');
 
                 if (output) {
                   insertIndex = Math.min(insertIndex, ytext.length);
+                  
+                  // Apply highlighting for "rewrite" mode (Suggestion Mode)
+                  // We must apply it explicitly to the editor so Quill tracks it
                   ytext.insert(insertIndex, output);
+                  
+                  if (mode === 'rewrite') {
+                    // Apply format to the newly inserted range
+                    // We need to use valid delta or editor.formatText
+                    // Note: ytext.insert with attributes works for Yjs, but binding might need help
+                    // Let's force update the attribute on the Yjs text
+                    const formatProps = { background: '#e2f0d9', color: '#000000' };
+                    ytext.format(insertIndex, output.length, formatProps);
+                  }
+                  
                   insertIndex += output.length;
+                  
                   await new Promise(r => setTimeout(r, 60));
                 }
               }
@@ -291,13 +365,150 @@ async function triggerAI(instruction, mode = 'insert') {
     log(`LLM error: ${err.message || String(err)}`);
   } finally {
     header.classList.remove('ai-active-border');
-    // if rewrite mode, optionally mark the range visually or add note (kept minimal here)
   }
 }
 
 // -------------------------
 // 4. wire UI actions
 // -------------------------
+// Suggestion Toolbar Logic
+const suggestionToolbar = document.getElementById('suggestion-toolbar');
+const acceptBtn = document.getElementById('btn-accept');
+const discardBtn = document.getElementById('btn-discard');
+
+function isSuggestionColor(color) {
+  // Debug: see what color is actually returned
+  // Quill/Yjs might return differing formats
+  if (!color) return false;
+  // Normalize checking
+  const c = String(color).toLowerCase().replace(/\s/g, '');
+  // #e2f0d9, rgb(226,240,217), rgba(226,240,217,1)
+  const valid = c === '#e2f0d9' || c.includes('226,240,217');
+  if (valid) return true;
+  return false;
+}
+
+function getSuggestionRange() {
+  // Helper: expands the current cursor/selection to the full block of suggestion text
+  const range = editor.getSelection();
+  if (!range) return null;
+
+  // If user already selected a range, verify it has the color
+  if (range.length > 0) {
+    const fmt = editor.getFormat(range.index); // check start
+    if (isSuggestionColor(fmt.background)) return range;
+    return null;
+  }
+
+  // If cursor (length 0), find bounds of the color block
+  const startFmt = editor.getFormat(range.index);
+  if (!isSuggestionColor(startFmt.background)) {
+    // Check previous char (cursor might be at end of block)
+    if (range.index > 0) {
+      const prevFmt = editor.getFormat(range.index - 1);
+      if (isSuggestionColor(prevFmt.background)) {
+        // we are at the end, scan backwards
+        let start = range.index - 1;
+        while (start > 0 && isSuggestionColor(editor.getFormat(start - 1).background)) {
+          start--;
+        }
+        return { index: start, length: range.index - start };
+      }
+    }
+    return null;
+  }
+
+  // Scan backwards
+  let start = range.index;
+  while (start > 0 && isSuggestionColor(editor.getFormat(start - 1).background)) {
+    start--;
+  }
+
+  // Scan forwards
+  let end = range.index;
+  const totalLength = editor.getLength();
+  while (end < totalLength && isSuggestionColor(editor.getFormat(end).background)) {
+    end++;
+  }
+
+  return { index: start, length: end - start };
+}
+
+function updateSuggestionToolbar() {
+  const range = editor.getSelection();
+  if (!range) {
+    suggestionToolbar.style.display = 'none';
+    return;
+  }
+  
+  // Check the format at cursor
+  let format = editor.getFormat(range.index);
+  // Also check character before cursor (if at end of word)
+  let prevFormat = (range.index > 0) ? editor.getFormat(range.index - 1) : {};
+  
+  // Debug log to see what we are getting
+  console.log('Cursor bg:', format.background, 'Prev bg:', prevFormat.background);
+
+  if (isSuggestionColor(format.background) || isSuggestionColor(prevFormat.background)) {
+    const bounds = editor.getBounds(range.index);
+    if (bounds) {
+        console.log('Showing toolbar at', bounds);
+        // Ensure we calculate from page origin including scroll
+        const top = (window.pageYOffset || document.documentElement.scrollTop) + bounds.top - 55;
+        const left = (window.pageXOffset || document.documentElement.scrollLeft) + bounds.left;
+        
+        suggestionToolbar.style.top = top + 'px';
+        suggestionToolbar.style.left = left + 'px';
+        suggestionToolbar.style.display = 'block';
+    }
+  } else {
+    suggestionToolbar.style.display = 'none';
+  }
+}
+
+// Ensure click updates it too (sometimes selection-change is lazy or differs)
+editor.root.addEventListener('click', () => {
+    setTimeout(updateSuggestionToolbar, 10);
+});
+
+editor.on('selection-change', updateSuggestionToolbar);
+
+acceptBtn.addEventListener('click', () => {
+  const fullRange = getSuggestionRange();
+  if (fullRange) {
+    // "Accept" = remove the highlighting (make it permanent/normal)
+    // Also remove the forced color so it adapts to theme
+    editor.formatText(fullRange.index, fullRange.length, {
+      'background': false,
+      'color': false
+    });
+    suggestionToolbar.style.display = 'none';
+  }
+});
+
+discardBtn.addEventListener('click', () => {
+  // Loop to catch fragmented ranges or boundary artifacts (e.g. "one char left")
+  let attempts = 0;
+  
+  function clean() {
+    const fullRange = getSuggestionRange();
+    if (fullRange) {
+      log(`Discarding suggestion... (${fullRange.index}, ${fullRange.length})`);
+      // Use Yjs direct delete for reliability
+      ytext.delete(fullRange.index, fullRange.length);
+      
+      // Retry after a microtask to handle adjacent fragments
+      if (attempts++ < 3) setTimeout(clean, 10);
+      else suggestionToolbar.style.display = 'none';
+      
+    } else {
+      suggestionToolbar.style.display = 'none';
+    }
+  }
+  
+  clean();
+});
+
 document.querySelectorAll('.ai-action').forEach(btn => {
   btn.addEventListener('click', (e) => {
     const prompt = e.currentTarget.dataset.prompt;
@@ -309,6 +520,31 @@ document.querySelectorAll('.ai-action').forEach(btn => {
 document.getElementById('btn-custom')?.addEventListener('click', () => {
   const val = document.getElementById('custom-prompt')?.value;
   if (val && val.trim().length) triggerAI(val.trim(), 'insert');
+});
+
+// 5. Demo Template Loading
+// -------------------------
+document.querySelectorAll('.demo-card').forEach(card => {
+  card.addEventListener('click', () => {
+    const templateKey = card.getAttribute('data-template');
+    const content = templates[templateKey];
+
+    if (content) {
+      // 1. Clear existing content (propagates to Yjs)
+      ytext.delete(0, ytext.length);
+      
+      // 2. Insert new content via Quill (parses HTML -> Delta -> Yjs)
+      // This is crucial: directly inserting string into Yjs bypasses HTML parsing
+      editor.clipboard.dangerouslyPasteHTML(0, content);
+      
+      log(`Loaded template: ${templateKey}`);
+      
+      // Update header
+      const docName = templateKey === 'MSA' ? 'Agreement.docx' : 
+                      templateKey === 'NDA' ? 'NDA.docx' : 'Employment_Contract.docx';
+      document.querySelector('.card-header span.fw-bold').innerHTML = `<i class="bi bi-file-earmark-text me-2"></i>${docName}`;
+    }
+  });
 });
 
 // expose simple debug on window
